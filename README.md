@@ -258,11 +258,6 @@ conda remove -n rnaseq --all
 ./install.sh
 ```
 
-### Getting Help
-- 📖 Check `docs/troubleshooting.md` for detailed solutions
-- 🐛 Open an issue on GitHub with error logs
-- 💬 Include system info and sample data info
-
 ## 📈 Performance Benchmarks
 
 | Genome | Samples | Time | RAM Usage | Storage |
