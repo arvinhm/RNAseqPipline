@@ -133,9 +133,9 @@ python results.py
 rnaseq-pipeline/
 ├── 📜 README.md                    # This file
 ├── ⚙️ install.sh                   # Install dependencies
-├── 📚 index_genome.sh             # Create genome indices
-├── 🧬 run.sh                      # Main analysis pipeline
-└── 📊 results.py                  # Merge results into CSV files
+├── 📚 index.sh                     # Create genome indices
+├── 🧬 run.sh                       # Main alignment pipeline
+└── 📊 results.py                   # Merge results into CSV files
 
 ```
 
