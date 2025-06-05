@@ -56,8 +56,8 @@ graph LR
 
 ### Step 1: Clone Repository
 ```bash
-git clone https://github.com/yourusername/rnaseq-pipeline.git
-cd rnaseq-pipeline
+git clone https://github.com/arvinhm/RNAseqPipline.git
+cd RNAseqPipline
 chmod +x *.sh
 ```
 
