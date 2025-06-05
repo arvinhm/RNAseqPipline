@@ -80,16 +80,16 @@ print_warning() {
 }
 
 # Configuration
-STAR_INDEX_DIR="/mnt/d/genome/STAR_index"
-RSEM_INDEX_PREFIX="/mnt/d/genome/RSEM_index/mouse_rsem"
-GTF_FILE="/mnt/d/genome/gencode.vM37.chr_patch_hapl_scaff.annotation.gtf"
-GENOME_FASTA="/mnt/d/genome/GRCm39.genome.fa"
-INPUT_DIR="/mnt/d/mad_rna_seq/one"
+STAR_INDEX_DIR="/mnt/d/genome/STAR_index_human"
+RSEM_INDEX_PREFIX="/mnt/d/genome/RSEM_index_human/human_rsem"
+GTF_FILE="/mnt/d/genome/gencode.v47.chr_patch_hapl_scaff.annotation.gtf"
+GENOME_FASTA="GRCh38.p14.genome.fa.gz"
+INPUT_DIR="/mnt/e/YKM-PDAC-30-1132233866/00_fastq"
 
 # Working and output directories
 WORK_DIR="/home/$(whoami)/rna_seq_work"
-OUTPUT_DIR="/mnt/d/mad_rna_seq/results"
-QC_DIR="/mnt/d/mad_rna_seq/qc_reports"
+OUTPUT_DIR="/mnt/e/YKM-PDAC-30-1132233866/results"
+QC_DIR="/mnt/e/YKM-PDAC-30-1132233866/qc_reports"
 
 # Performance settings - OPTIMIZED FOR HIGH QUALITY
 STAR_THREADS=24
@@ -390,58 +390,143 @@ for i in "${!SAMPLES[@]}"; do
         samtools stats "${SAMPLE}_Aligned.sortedByCoord.out.bam" > "$SAMPLE_QC_DIR/${SAMPLE}_bamstats.txt"
     fi
     
-    # Deduplication step
+    # Deduplication step - FIXED VERSION
     FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.out.bam"
+    continue_to_quantification=false
     
     if [[ "$RUN_DEDUP" == true ]]; then
         echo ""
         print_info "${GEAR} Running deduplication with Picard MarkDuplicates..."
         dedup_start_time=$(date +%s)
         
-        # Run Picard MarkDuplicates
-        picard MarkDuplicates \
+        # First add read groups since STAR doesn't add them by default
+        print_info "Adding read groups to BAM file..."
+        picard AddOrReplaceReadGroups \
             INPUT="${SAMPLE}_Aligned.sortedByCoord.out.bam" \
-            OUTPUT="${SAMPLE}_Aligned.sortedByCoord.dedup.bam" \
-            METRICS_FILE="${SAMPLE}_dedup_metrics.txt" \
-            REMOVE_DUPLICATES=true \
-            ASSUME_SORTED=true \
+            OUTPUT="${SAMPLE}_Aligned.sortedByCoord.rg.bam" \
+            RGID="${SAMPLE}" \
+            RGLB="lib1" \
+            RGPL="ILLUMINA" \
+            RGPU="unit1" \
+            RGSM="${SAMPLE}" \
             VALIDATION_STRINGENCY=LENIENT \
-            CREATE_INDEX=true \
-            MAX_RECORDS_IN_RAM=2000000 \
-            TMP_DIR="/tmp" 2>&1 | tee "$SAMPLE_QC_DIR/${SAMPLE}_dedup.log"
+            CREATE_INDEX=false \
+            TMP_DIR="/tmp" 2>&1 | tee "$SAMPLE_QC_DIR/${SAMPLE}_addRG.log"
         
-        dedup_exit_code=${PIPESTATUS[0]}
-        dedup_time=$(($(date +%s) - dedup_start_time))
+        addRG_exit_code=${PIPESTATUS[0]}
         
-        if [ $dedup_exit_code -eq 0 ] && [[ -f "${SAMPLE}_Aligned.sortedByCoord.dedup.bam" ]]; then
-            # Update the final BAM to use deduplicated version
-            FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.dedup.bam"
+        if [ $addRG_exit_code -ne 0 ] || [[ ! -f "${SAMPLE}_Aligned.sortedByCoord.rg.bam" ]]; then
+            print_error "Adding read groups failed (exit code: $addRG_exit_code), trying alternative approach..."
             
-            # Show deduplication statistics
-            if [[ -f "${SAMPLE}_dedup_metrics.txt" ]]; then
-                # Parse dedup metrics (skip header lines and get the data line)
-                total_reads_dedup=$(grep -A 1 "## METRICS CLASS" "${SAMPLE}_dedup_metrics.txt" | tail -1 | awk '{print $3}')
-                duplicate_reads=$(grep -A 1 "## METRICS CLASS" "${SAMPLE}_dedup_metrics.txt" | tail -1 | awk '{print $7}')
+            # Alternative: Use samtools to add read groups (if picard fails)
+            if command -v samtools &> /dev/null; then
+                print_info "Using samtools addreplacerg as fallback..."
+                samtools addreplacerg \
+                    -r "@RG\tID:${SAMPLE}\tSM:${SAMPLE}\tPL:ILLUMINA\tLB:lib1\tPU:unit1" \
+                    -o "${SAMPLE}_Aligned.sortedByCoord.rg.bam" \
+                    "${SAMPLE}_Aligned.sortedByCoord.out.bam" 2>&1 | tee "$SAMPLE_QC_DIR/${SAMPLE}_addRG_samtools.log"
                 
-                # Calculate duplicate percentage
-                if [[ "$total_reads_dedup" -gt 0 ]]; then
-                    dedup_rate=$(echo "scale=2; $duplicate_reads * 100 / $total_reads_dedup" | bc -l 2>/dev/null || echo "N/A")
+                samtools_exit_code=$?
+                if [ $samtools_exit_code -ne 0 ] || [[ ! -f "${SAMPLE}_Aligned.sortedByCoord.rg.bam" ]]; then
+                    print_error "Both Picard and samtools failed to add read groups. Trying samtools markdup instead..."
+                    
+                    # Final fallback: Use samtools markdup which doesn't require read groups
+                    samtools markdup \
+                        -r \
+                        -s \
+                        -f "$SAMPLE_QC_DIR/${SAMPLE}_markdup_stats.txt" \
+                        "${SAMPLE}_Aligned.sortedByCoord.out.bam" \
+                        "${SAMPLE}_Aligned.sortedByCoord.dedup.bam" 2>&1 | tee "$SAMPLE_QC_DIR/${SAMPLE}_samtools_markdup.log"
+                    
+                    samtools_markdup_exit_code=$?
+                    dedup_time=$(($(date +%s) - dedup_start_time))
+                    
+                    if [ $samtools_markdup_exit_code -eq 0 ] && [[ -f "${SAMPLE}_Aligned.sortedByCoord.dedup.bam" ]]; then
+                        # Index the deduplicated BAM
+                        samtools index "${SAMPLE}_Aligned.sortedByCoord.dedup.bam"
+                        
+                        FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.dedup.bam"
+                        print_success "Deduplication completed with samtools markdup in ${CYAN}${dedup_time}s${NC}"
+                        echo -e "    ${DIM}Original BAM: $(du -h "${SAMPLE}_Aligned.sortedByCoord.out.bam" | cut -f1)${NC}"
+                        echo -e "    ${DIM}Deduplicated BAM: $(du -h "$FINAL_BAM" | cut -f1)${NC}"
+                        
+                        # Parse samtools markdup stats if available
+                        if [[ -f "$SAMPLE_QC_DIR/${SAMPLE}_markdup_stats.txt" ]]; then
+                            echo -e "    ${DIM}Deduplication stats saved to: ${SAMPLE}_markdup_stats.txt${NC}"
+                        fi
+                    else
+                        print_error "samtools markdup failed (exit code: $samtools_markdup_exit_code), using original BAM"
+                        FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.out.bam"
+                    fi
+                    
+                    # Skip the rest of the Picard workflow
+                    continue_to_quantification=true
                 else
-                    dedup_rate="N/A"
+                    print_success "Read groups added successfully with samtools"
                 fi
-                
-                print_success "Deduplication completed in ${CYAN}${dedup_time}s${NC}"
-                echo -e "    ${DIM}Original BAM: $(du -h "${SAMPLE}_Aligned.sortedByCoord.out.bam" | cut -f1)${NC}"
-                echo -e "    ${DIM}Deduplicated BAM: $(du -h "$FINAL_BAM" | cut -f1)${NC}"
-                echo -e "    ${DIM}Duplicate rate: ${dedup_rate}%${NC}"
             else
-                print_success "Deduplication completed in ${CYAN}${dedup_time}s${NC}"
-                echo -e "    ${DIM}Deduplicated BAM: $(du -h "$FINAL_BAM" | cut -f1)${NC}"
+                print_error "samtools not available, using original BAM without deduplication"
+                FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.out.bam"
+                continue_to_quantification=true
             fi
         else
-            print_error "Deduplication failed (exit code: $dedup_exit_code), using original BAM"
-            print_error "Check log: $SAMPLE_QC_DIR/${SAMPLE}_dedup.log"
-            FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.out.bam"
+            print_success "Read groups added successfully with Picard"
+        fi
+        
+        # Only run Picard MarkDuplicates if we haven't already done deduplication with samtools
+        if [[ ! "$continue_to_quantification" == true ]] && [[ -f "${SAMPLE}_Aligned.sortedByCoord.rg.bam" ]]; then
+            # Run Picard MarkDuplicates on the BAM with read groups
+            print_info "Running Picard MarkDuplicates..."
+            picard MarkDuplicates \
+                INPUT="${SAMPLE}_Aligned.sortedByCoord.rg.bam" \
+                OUTPUT="${SAMPLE}_Aligned.sortedByCoord.dedup.bam" \
+                METRICS_FILE="${SAMPLE}_dedup_metrics.txt" \
+                REMOVE_DUPLICATES=true \
+                ASSUME_SORTED=true \
+                VALIDATION_STRINGENCY=LENIENT \
+                CREATE_INDEX=true \
+                MAX_RECORDS_IN_RAM=2000000 \
+                TMP_DIR="/tmp" 2>&1 | tee "$SAMPLE_QC_DIR/${SAMPLE}_dedup.log"
+            
+            dedup_exit_code=${PIPESTATUS[0]}
+            dedup_time=$(($(date +%s) - dedup_start_time))
+            
+            if [ $dedup_exit_code -eq 0 ] && [[ -f "${SAMPLE}_Aligned.sortedByCoord.dedup.bam" ]]; then
+                # Update the final BAM to use deduplicated version
+                FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.dedup.bam"
+                
+                # Show deduplication statistics
+                if [[ -f "${SAMPLE}_dedup_metrics.txt" ]]; then
+                    # Parse dedup metrics (skip header lines and get the data line)
+                    total_reads_dedup=$(grep -A 1 "## METRICS CLASS" "${SAMPLE}_dedup_metrics.txt" | tail -1 | awk '{print $3}')
+                    duplicate_reads=$(grep -A 1 "## METRICS CLASS" "${SAMPLE}_dedup_metrics.txt" | tail -1 | awk '{print $7}')
+                    
+                    # Calculate duplicate percentage
+                    if [[ "$total_reads_dedup" -gt 0 ]]; then
+                        dedup_rate=$(echo "scale=2; $duplicate_reads * 100 / $total_reads_dedup" | bc -l 2>/dev/null || echo "N/A")
+                    else
+                        dedup_rate="N/A"
+                    fi
+                    
+                    print_success "Deduplication completed in ${CYAN}${dedup_time}s${NC}"
+                    echo -e "    ${DIM}Original BAM: $(du -h "${SAMPLE}_Aligned.sortedByCoord.out.bam" | cut -f1)${NC}"
+                    echo -e "    ${DIM}Deduplicated BAM: $(du -h "$FINAL_BAM" | cut -f1)${NC}"
+                    echo -e "    ${DIM}Duplicate rate: ${dedup_rate}%${NC}"
+                else
+                    print_success "Deduplication completed in ${CYAN}${dedup_time}s${NC}"
+                    echo -e "    ${DIM}Deduplicated BAM: $(du -h "$FINAL_BAM" | cut -f1)${NC}"
+                fi
+                
+                # Clean up intermediate file with read groups
+                rm -f "${SAMPLE}_Aligned.sortedByCoord.rg.bam"
+                
+            else
+                print_error "Picard MarkDuplicates failed (exit code: $dedup_exit_code), using original BAM"
+                print_error "Check log: $SAMPLE_QC_DIR/${SAMPLE}_dedup.log"
+                FINAL_BAM="${SAMPLE}_Aligned.sortedByCoord.out.bam"
+                # Clean up intermediate file
+                rm -f "${SAMPLE}_Aligned.sortedByCoord.rg.bam"
+            fi
         fi
     else
         echo ""
