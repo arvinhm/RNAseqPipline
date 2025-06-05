@@ -287,6 +287,6 @@ conda remove -n rnaseq --all
 
 **⭐ If this pipeline helped your research, please give it a star! ⭐**
 
-Made with ❤️ for the RNA-seq community
+Made with ❤️ for the community
 
 </div>
